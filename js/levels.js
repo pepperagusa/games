@@ -68,6 +68,27 @@
       }
     }
 
+    // Speed boosters (levels 11+): a full column of boosters in the open space before a section,
+    // so the wave can't miss it. A boosted stretch lasts a few sections, then a blue booster resets it.
+    let pendingBoost = -1, boostNow = 0, boostLeft = 0;
+    function placeBoost(spacing) {
+      if (pendingBoost < 0) return;
+      const c = col + Math.floor(spacing / 2);
+      for (let r = 1; r <= ROWS - 2; r++) if (!cells.has(c * ROWS + r)) put(c, r, BOOST, pendingBoost);
+      pendingBoost = -1;
+    }
+    function planBoost() {
+      if (i < 10) return;
+      if (boostNow === 0) {
+        if (rnd() < 0.2 + 0.15 * d) {
+          boostNow = pendingBoost = i >= 15 && rnd() < 0.5 ? 2 : 1;
+          boostLeft = RI(2, 4);
+        }
+      } else if (--boostLeft <= 0) {
+        boostNow = pendingBoost = 0;
+      }
+    }
+
     function gate() {
       const g = RI(gMin, gMax);
       const prev = centers[Math.floor(rnd() * centers.length)];
@@ -75,6 +96,7 @@
       const center = top + g / 2;
       const spacing = spacingFor(reach(center));
       floorCeilingSpikes(col, col + spacing);
+      placeBoost(spacing);
       col += spacing;
       const w = RI(1, 1 + Math.round(2 * d));
       const bot = top + g - 1;
@@ -104,6 +126,7 @@
       const need = Math.min(reach(above), reach(below));
       const spacing = spacingFor(need);
       floorCeilingSpikes(col, col + spacing);
+      placeBoost(spacing);
       col += spacing;
       const w = RI(2, 4);
       for (let c = col; c < col + w; c++) {
@@ -123,6 +146,7 @@
       const prev = centers[Math.floor(rnd() * centers.length)];
       let top = clamp(Math.round(prev - g / 2), 2, ROWS - 2 - g);
       const spacing = spacingFor(reach(top + g / 2));
+      placeBoost(spacing);
       col += spacing;
       const L = RI(8, 10 + Math.round(16 * d));
       let slope = 0, segLeft = 0;
@@ -157,6 +181,7 @@
     }
 
     while (col < length - 34) {
+      planBoost();
       const roll = rnd();
       const pTunnel = i >= 8 ? 0.15 + 0.15 * d : 0;
       const pIsland = i >= 4 ? 0.2 + 0.1 * d : 0;

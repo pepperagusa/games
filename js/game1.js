@@ -175,7 +175,8 @@
     play.state = 'ready';
     showMsg({
       title: source.kind === 'level' ? `Level ${source.index + 1}` : source.kind === 'test' ? 'Test run' : data.name,
-      sub: source.kind === 'level' ? data.name : 'Reach the finish line',
+      sub: source.kind === 'level' ? data.name
+        : source.kind === 'test' && data.start ? `Practice from your start position (column ${data.start.c})` : 'Reach the finish line',
       prompt: 'Tap, click or press Space to start',
       buttons: [],
     });
@@ -183,13 +184,17 @@
 
   function resetRun() {
     play.attempts++;
-    play.wave = { x: 0, y: WORLD_H / 2, up: false };
-    play.speed = play.L.speed;
-    play.boost = 0;
-    play.trail = [{ x: 0, y: WORLD_H / 2 }];
+    // Editor test runs begin at the start position, if one is placed.
+    const st = play.source.kind === 'test' ? play.data.start : null;
+    const x0 = st ? st.c * CELL + CELL / 2 : 0;
+    const y0 = st ? st.r * CELL + CELL / 2 : WORLD_H / 2;
+    play.wave = { x: x0, y: y0, up: false };
+    play.boost = st ? st.s : 0;
+    play.speed = play.L.speed * WL.BOOST_MULT[play.boost];
+    play.trail = [{ x: x0, y: y0 }];
     play.particles = [];
     play.shake = 0;
-    play.pct = 0;
+    play.pct = Math.min(100, Math.floor((x0 / (play.L.length * CELL)) * 100));
     $('hudAttempt').textContent = `Attempt ${play.attempts}`;
     updateHud();
   }
@@ -351,7 +356,7 @@
   // ---------- Editor ----------
   const editor = {
     id: null, map: new Map(), speed: 400, length: 60, camX: -2 * CELL, scrollMax: 0,
-    tool: 'block', dir: WL.UP, boost: 1, drag: null, hover: null, dirty: false, L: null,
+    tool: 'block', dir: WL.UP, boost: 1, start: null, drag: null, hover: null, dirty: false, L: null,
   };
   const DIR_ARROWS = ['▲', '▶', '▼', '◀'];
   const SLOPE_GLYPHS = ['◣', '◢', '◥', '◤'];
@@ -363,6 +368,7 @@
     if (lv) for (const [c, r, t, dir] of lv.objects) editor.map.set(c * ROWS + r, { c, r, t, dir: dir || 0 });
     editor.speed = lv ? lv.speed : 400;
     editor.length = lv ? (lv.length || WL.levelLength(lv.objects)) : 60;
+    editor.start = lv && lv.start ? { ...lv.start } : null;
     editor.scrollMax = 0;
     editor.camX = -2 * CELL;
     editor.dirty = false;
@@ -384,6 +390,7 @@
       name: $('edName').value.trim() || 'Untitled level',
       speed: editor.speed,
       length: editor.length,
+      start: editor.start ? { ...editor.start } : null,
       objects: [...editor.map.values()].map((o) => [o.c, o.r, o.t, o.dir]),
     };
   }
@@ -394,13 +401,15 @@
 
   function syncEditorUI() {
     document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === editor.tool));
-    $('edDir').textContent = `⟳ ${editor.tool === 'boost' ? BOOST_GLYPHS[editor.boost] : editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
+    $('edTest').textContent = editor.start ? '▶ Test from ⚑' : '▶ Test';
+    $('edDir').textContent = `⟳ ${editor.tool === 'start' ? BOOST_GLYPHS[editor.start ? editor.start.s : 0] : editor.tool === 'boost' ? BOOST_GLYPHS[editor.boost] : editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
     syncScroll();
   }
   // Smallest allowed length: the finish must stay past the last piece.
   function minLength() {
     let max = -1;
     for (const o of editor.map.values()) max = Math.max(max, o.c);
+    if (editor.start) max = Math.max(max, editor.start.c);
     return Math.max(10, max + 2);
   }
   function setLength(n) {
@@ -424,7 +433,8 @@
 
   document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => { editor.tool = b.dataset.tool; syncEditorUI(); }));
   const rotateTool = () => {
-    if (editor.tool === 'boost') editor.boost = (editor.boost + 1) % 3;
+    if (editor.tool === 'start') { if (editor.start) { editor.start.s = (editor.start.s + 1) % 3; editor.dirty = true; } }
+    else if (editor.tool === 'boost') editor.boost = (editor.boost + 1) % 3;
     else editor.dir = (editor.dir + 1) % 4;
     syncEditorUI();
   };
@@ -445,7 +455,9 @@
   $('edClear').addEventListener('click', () => {
     if (editor.map.size && confirm('Remove everything from this level?')) {
       editor.map.clear();
+      editor.start = null;
       editor.dirty = true;
+      syncEditorUI();
       recompileEditor();
     }
   });
@@ -477,6 +489,14 @@
     if (c < 0 || r < 1 || r > ROWS - 2) return;
     const key = c * ROWS + r;
     const cur = editor.map.get(key);
+    const onStart = editor.start && editor.start.c === c && editor.start.r === r;
+    if (mode === 'erase' && onStart) {
+      editor.start = null;
+      editor.dirty = true;
+      syncEditorUI();
+      return;
+    }
+    if (onStart) return; // keep the start position's square empty
     if (mode === 'erase') {
       if (!cur) return;
       editor.map.delete(key);
@@ -509,6 +529,10 @@
       return;
     }
     let mode = e.button === 2 ? 'erase' : editor.tool;
+    if (mode === 'start') {
+      placeStart(c, r);
+      return;
+    }
     if (mode === 'spike' || mode === 'slope' || mode === 'boost') {
       // Tapping an existing piece of the same kind rotates it (or changes the booster's speed).
       const cur = editor.map.get(c * ROWS + r);
@@ -525,6 +549,25 @@
     editor.drag = { mode, last: `${c},${r}` };
     applyTool(c, r, mode);
   }
+  // Start position: where editor test runs begin, for practicing one part of a level.
+  function placeStart(c, r) {
+    if (c < 0 || r < 1 || r > ROWS - 2) return;
+    const st = editor.start;
+    if (st && st.c === c && st.r === r) {
+      st.s = (st.s + 1) % 3; // tap it again to change its speed
+    } else {
+      if (editor.map.has(c * ROWS + r)) { toast('Put the start position on an empty square'); return; }
+      // Start at the speed of the last booster before this point.
+      let s = 0, best = -1;
+      for (const o of editor.map.values()) if (o.t === BOOST && o.c < c && o.c > best) { best = o.c; s = o.dir; }
+      editor.start = { c, r, s };
+      if (c >= editor.length - 1) editor.length = c + 10;
+    }
+    editor.dirty = true;
+    recompileEditor();
+    syncEditorUI();
+  }
+
   function editorPointerMove(e) {
     const { c, r } = cellAt(e.clientX, e.clientY);
     editor.hover = e.pointerType === 'mouse' ? { c, r } : null;
@@ -578,7 +621,7 @@
         press();
       } else if (e.code === 'Escape') exitPlay();
     } else if (screen === 'editor') {
-      const tools = { Digit1: 'block', Digit2: 'slope', Digit3: 'spike', Digit4: 'boost', Digit5: 'erase', Digit6: 'pan' };
+      const tools = { Digit1: 'block', Digit2: 'slope', Digit3: 'spike', Digit4: 'boost', Digit5: 'start', Digit6: 'erase', Digit7: 'pan' };
       if (tools[e.code]) { editor.tool = tools[e.code]; syncEditorUI(); }
       else if (e.code === 'KeyR') rotateTool();
       else if (e.code === 'ArrowRight' || e.code === 'KeyD') { editor.camX += CELL * 3; clampCam(); syncScroll(); }
@@ -719,6 +762,24 @@
     ctx.restore();
   }
 
+  function drawStartPos(c, r, s, alpha) {
+    const x = c * CELL, y = r * CELL, color = BOOST_COLORS[s];
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(x + 1, y + 1, CELL - 2, CELL - 2);
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = '700 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`⚑ START ${BOOST_GLYPHS[s]}`, x + CELL / 2, y - 3);
+    ctx.restore();
+    drawWave({ x: x + CELL / 2, y: y + CELL / 2, up: false }, ctx.globalAlpha * alpha);
+  }
+
   function drawWave(w, alpha = 1) {
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -790,8 +851,10 @@
     ctx.fillStyle = COLORS.gold;
     ctx.fillText('FINISH', fx + CELL / 2, CELL / 2);
 
-    // Start marker.
-    drawWave({ x: 0, y: WORLD_H / 2, up: false }, 0.8);
+    // Beginning of the level.
+    drawWave({ x: 0, y: WORLD_H / 2, up: false }, editor.start ? 0.35 : 0.8);
+    // Start position marker.
+    if (editor.start) drawStartPos(editor.start.c, editor.start.r, editor.start.s, 1);
 
     // Hover preview.
     const h = editor.hover;
@@ -806,6 +869,8 @@
         ctx.fillRect(h.c * CELL, h.r * CELL, CELL, CELL);
       } else if (editor.tool === 'boost') {
         drawBoost(h.c, h.r, editor.boost);
+      } else if (editor.tool === 'start') {
+        drawStartPos(h.c, h.r, editor.start ? editor.start.s : 0, 1);
       } else {
         const p = editor.tool === 'slope' ? WL.slopePoints(h.c, h.r, editor.dir) : WL.spikePoints(h.c, h.r, editor.dir, 0.92);
         ctx.fillStyle = COLORS.edge;

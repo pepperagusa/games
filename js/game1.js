@@ -1,351 +1,721 @@
-// The Wave — hold to fly up at 45°, release to fly down at 45°. Don't touch anything.
+// The Wave — hold to fly up at 45°, release to fly down at 45°. 20 levels + a level editor.
 (() => {
   'use strict';
 
-  const canvas = document.getElementById('game');
+  const WL = window.WaveLevels;
+  const { CELL, ROWS, WORLD_H, BLOCK, SPIKE, SLOPE } = WL;
+  const COLORS = { bg: '#070815', solid: '#141633', edge: '#ff4f8b', wave: '#5ef2ff', gold: '#ffd166' };
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('game');
   const ctx = canvas.getContext('2d');
-  const scoreEl = document.getElementById('score');
-  const bestEl = document.getElementById('best');
-  const overlay = document.getElementById('overlay');
-  const titleEl = document.getElementById('title');
-  const subtitleEl = document.getElementById('subtitle');
-  const promptEl = document.getElementById('prompt');
 
-  // ---------- World ----------
-  // The world is 600 units tall; it is scaled to fit the screen height.
-  const WORLD_H = 600;
-  const BORDER = 30;          // solid floor and ceiling thickness
-  const WAVE_R = 7;           // collision radius of the wave
-  const SPIKE_H = 22;
-  const START_SPEED = 380;    // units per second
-  const MAX_SPEED = 600;
-
-  let W = 0, H = 0, DPR = 1, scale = 1, viewW = 0;
+  // ---------- Canvas sizing ----------
+  let W = 0, H = 0, DPR = 1;
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth;
     H = window.innerHeight;
     canvas.width = Math.round(W * DPR);
     canvas.height = Math.round(H * DPR);
-    scale = H / WORLD_H;
-    viewW = W / scale;
   }
   window.addEventListener('resize', resize);
   resize();
 
-  // ---------- Best score ----------
-  const BEST_KEY = 'thewave.best';
-  let best = 0;
-  try { best = parseInt(localStorage.getItem(BEST_KEY), 10) || 0; } catch { best = 0; }
-  bestEl.textContent = best;
+  // Play view: fit the 600-unit-tall world, but always show at least ~720 units ahead.
+  function playView() {
+    const scale = Math.min(H / WORLD_H, W / 720);
+    return { scale, offY: (H - WORLD_H * scale) / 2, viewW: W / scale };
+  }
+  function editorView() {
+    const top = $('edTop').offsetHeight, bot = $('edBottom').offsetHeight;
+    const scale = Math.max(0.2, (H - top - bot) / WORLD_H);
+    return { scale, offY: top, viewW: W / scale };
+  }
 
-  // ---------- State ----------
-  let state = 'ready'; // ready | playing | dead
+  // ---------- Storage ----------
+  function load(key, def) {
+    try { const v = JSON.parse(localStorage.getItem(key)); return v ?? def; } catch { return def; }
+  }
+  function store(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch { /* ignore */ }
+  }
+  const progress = load('thewave.progress', { done: [], best: [] });
+  let customs = load('thewave.custom', []);
+
+  function toast(text) {
+    const t = $('toast');
+    t.textContent = text;
+    t.classList.remove('hidden');
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => t.classList.add('hidden'), 1800);
+  }
+
+  // ---------- Screens ----------
+  let screen = 'menu';
+  const PANELS = ['menu', 'levels', 'mylevels', 'hud', 'msg', 'edTop', 'edBottom'];
+  function showScreen(name) {
+    screen = name;
+    for (const id of PANELS) $(id).classList.add('hidden');
+    if (name === 'menu') $('menu').classList.remove('hidden');
+    if (name === 'levels') { buildLevelGrid(); $('levels').classList.remove('hidden'); }
+    if (name === 'mylevels') { buildCustomList(); $('mylevels').classList.remove('hidden'); }
+    if (name === 'play') $('hud').classList.remove('hidden');
+    if (name === 'editor') {
+      $('edTop').classList.remove('hidden');
+      $('edBottom').classList.remove('hidden');
+      syncEditorUI();
+    }
+  }
+  document.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => showScreen(b.dataset.go)));
+  $('btnPlay').addEventListener('click', () => showScreen('levels'));
+  $('btnCreate').addEventListener('click', () => showScreen('mylevels'));
+
+  // ---------- Level select ----------
+  const isUnlocked = (i) => i === 0 || !!progress.done[i - 1];
+  function buildLevelGrid() {
+    const grid = $('levelGrid');
+    grid.innerHTML = '';
+    for (let i = 0; i < WL.COUNT; i++) {
+      const b = document.createElement('button');
+      const unlocked = isUnlocked(i);
+      b.className = 'level-btn' + (progress.done[i] ? ' done' : '') + (unlocked ? '' : ' locked');
+      b.disabled = !unlocked;
+      b.title = WL.getLevel(i).name;
+      const pct = progress.done[i] ? '★ done' : unlocked ? `${progress.best[i] || 0}%` : '🔒';
+      b.innerHTML = `<span class="num">${i + 1}</span><span class="pct">${pct}</span>`;
+      b.addEventListener('click', () => startPlay(WL.getLevel(i), { kind: 'level', index: i }));
+      grid.appendChild(b);
+    }
+  }
+
+  // ---------- Custom levels list ----------
+  function saveCustoms() { store('thewave.custom', customs); }
+  function buildCustomList() {
+    const list = $('customList');
+    list.innerHTML = '';
+    $('customEmpty').classList.toggle('hidden', customs.length > 0);
+    for (const lv of customs) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = lv.name;
+      li.appendChild(name);
+      const add = (label, fn, cls) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        if (cls) b.className = cls;
+        b.addEventListener('click', fn);
+        li.appendChild(b);
+      };
+      add('▶ Play', () => startPlay(lv, { kind: 'custom', id: lv.id }), 'primary');
+      add('Edit', () => openEditor(lv));
+      add('Share', () => shareLevel(lv));
+      add('Delete', () => {
+        if (!confirm(`Delete "${lv.name}"?`)) return;
+        customs = customs.filter((x) => x.id !== lv.id);
+        saveCustoms();
+        buildCustomList();
+      });
+      list.appendChild(li);
+    }
+  }
+
+  function encodeLevel(lv) {
+    const json = JSON.stringify({ n: lv.name, s: lv.speed, o: lv.objects });
+    return 'WAVE1:' + btoa(unescape(encodeURIComponent(json)));
+  }
+  function decodeLevel(code) {
+    const raw = code.trim().replace(/^WAVE1:/, '');
+    const obj = JSON.parse(decodeURIComponent(escape(atob(raw))));
+    const speed = Number(obj.s);
+    if (!Array.isArray(obj.o) || !(speed >= 200 && speed <= 800)) throw new Error('bad level');
+    const objects = obj.o.filter((o) => Array.isArray(o) && o.length >= 3 &&
+      Number.isInteger(o[0]) && o[0] >= 0 && o[0] < 5000 &&
+      Number.isInteger(o[1]) && o[1] >= 1 && o[1] <= ROWS - 2 &&
+      (o[2] === BLOCK || o[2] === SPIKE || o[2] === SLOPE)).map((o) => [o[0], o[1], o[2], (o[3] | 0) & 3]);
+    return { name: String(obj.n || 'Imported level').slice(0, 30), speed, objects };
+  }
+  function shareLevel(lv) {
+    const code = encodeLevel(lv);
+    const fallback = () => prompt('Copy this level code:', code);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(() => toast('Level code copied!'), fallback);
+    } else fallback();
+  }
+  $('btnImport').addEventListener('click', () => {
+    const code = prompt('Paste a level code:');
+    if (!code) return;
+    try {
+      const lv = decodeLevel(code);
+      lv.id = 'lv' + Date.now();
+      customs.push(lv);
+      saveCustoms();
+      buildCustomList();
+      toast(`Imported "${lv.name}"`);
+    } catch {
+      toast('That code is not a valid level');
+    }
+  });
+  $('btnNewLevel').addEventListener('click', () => openEditor(null));
+
+  // ---------- Playing ----------
+  let play = null;
   let holding = false;
-  let wave, obstacles, particles, trail, camX, nextGateX, lastGap, deadTime, shake, score;
 
-  function reset() {
-    wave = { x: 0, y: WORLD_H / 2, up: false, speed: START_SPEED };
-    trail = [{ x: wave.x, y: wave.y }];
-    obstacles = [];
-    particles = [];
-    camX = wave.x - viewW * 0.3;
-    nextGateX = wave.x + viewW * 0.8;
-    lastGap = { center: WORLD_H / 2, size: 260 };
-    deadTime = 0;
-    shake = 0;
-    score = 0;
-    scoreEl.textContent = '0';
+  function startPlay(data, source) {
+    play = { data, L: WL.compile(data), source, attempts: 0 };
+    showScreen('play');
+    $('hudName').textContent = source.kind === 'level' ? `${source.index + 1}. ${data.name}` : data.name;
+    resetRun();
+    play.state = 'ready';
+    showMsg({
+      title: source.kind === 'level' ? `Level ${source.index + 1}` : source.kind === 'test' ? 'Test run' : data.name,
+      sub: source.kind === 'level' ? data.name : 'Reach the finish line',
+      prompt: 'Tap, click or press Space to start',
+      buttons: [],
+    });
   }
-  reset();
 
-  // ---------- Level generation ----------
-  const rand = (a, b) => a + Math.random() * (b - a);
+  function resetRun() {
+    play.attempts++;
+    play.wave = { x: 0, y: WORLD_H / 2, up: false };
+    play.trail = [{ x: 0, y: WORLD_H / 2 }];
+    play.particles = [];
+    play.shake = 0;
+    play.pct = 0;
+    $('hudAttempt').textContent = `Attempt ${play.attempts}`;
+    updateHud();
+  }
 
-  // Difficulty 0..1 based on distance travelled.
-  const difficulty = () => Math.min(1, wave.x / 30000);
-
-  function addGate() {
-    const d = difficulty();
-    const width = rand(40, 90 + 60 * d);
-    const spacing = rand(300, 420) - 120 * d;
-    const size = Math.max(115, rand(230, 280) - 130 * d); // clear gap between spike tips
-
-    // Keep the next gap reachable: the wave moves 1 unit up/down per unit forward.
-    const maxShift = (spacing - width) * 0.75;
-    const minC = BORDER + size / 2 + SPIKE_H + 10;
-    const maxC = WORLD_H - BORDER - size / 2 - SPIKE_H - 10;
-    let center = lastGap.center + rand(-maxShift, maxShift);
-    center = Math.max(minC, Math.min(maxC, center));
-
-    const x = nextGateX;
-    const topEnd = center - size / 2 - SPIKE_H;    // bottom edge of top pillar
-    const botStart = center + size / 2 + SPIKE_H;  // top edge of bottom pillar
-
-    obstacles.push({ type: 'rect', x, y: 0, w: width, h: topEnd });
-    obstacles.push({ type: 'rect', x, y: botStart, w: width, h: WORLD_H - botStart });
-
-    // A row of spikes on each pillar tip, pointing into the gap.
-    const n = Math.max(1, Math.round(width / 28));
-    const sw = width / n;
-    for (let i = 0; i < n; i++) {
-      const sx = x + i * sw;
-      obstacles.push({ type: 'spike', pts: [[sx, topEnd], [sx + sw, topEnd], [sx + sw / 2, topEnd + SPIKE_H]] });
-      obstacles.push({ type: 'spike', pts: [[sx, botStart], [sx + sw, botStart], [sx + sw / 2, botStart - SPIKE_H]] });
+  function showMsg({ title, sub, prompt, buttons, win }) {
+    $('msgTitle').textContent = title;
+    $('msgSub').textContent = sub || '';
+    $('msgPrompt').textContent = prompt || '';
+    const box = $('msgButtons');
+    box.innerHTML = '';
+    for (const [label, fn, primary] of buttons) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      if (primary) b.className = 'primary';
+      b.addEventListener('click', fn);
+      box.appendChild(b);
     }
+    $('msg').classList.toggle('win', !!win);
+    $('msg').classList.remove('hidden');
+  }
+  const hideMsg = () => $('msg').classList.add('hidden');
 
-    // Sometimes add spikes on the floor or ceiling between gates.
-    if (Math.random() < 0.35 + 0.3 * d) {
-      const onFloor = Math.random() < 0.5;
-      const count = Math.floor(rand(2, 5));
-      const startX = x + width + rand(40, Math.max(50, spacing - width - 40 - count * 26));
-      for (let i = 0; i < count; i++) {
-        const sx = startX + i * 26;
-        if (onFloor) {
-          const yb = WORLD_H - BORDER;
-          obstacles.push({ type: 'spike', pts: [[sx, yb], [sx + 26, yb], [sx + 13, yb - SPIKE_H * 1.4]] });
-        } else {
-          obstacles.push({ type: 'spike', pts: [[sx, BORDER], [sx + 26, BORDER], [sx + 13, BORDER + SPIKE_H * 1.4]] });
-        }
-      }
-    }
+  function exitPlay() {
+    holding = false;
+    const s = play.source;
+    if (s.kind === 'test') showScreen('editor');
+    else if (s.kind === 'custom') showScreen('mylevels');
+    else showScreen('levels');
+  }
+  $('btnQuit').addEventListener('click', exitPlay);
 
-    lastGap = { center, size };
-    nextGateX = x + spacing;
-  }
-
-  // ---------- Collision ----------
-  function circleRect(cx, cy, r, o) {
-    const nx = Math.max(o.x, Math.min(cx, o.x + o.w));
-    const ny = Math.max(o.y, Math.min(cy, o.y + o.h));
-    return (cx - nx) ** 2 + (cy - ny) ** 2 < r * r;
-  }
-  function distToSeg(px, py, ax, ay, bx, by) {
-    const dx = bx - ax, dy = by - ay;
-    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
-    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-  }
-  function pointInTri(px, py, [a, b, c]) {
-    const s = (p1, p2) => (px - p2[0]) * (p1[1] - p2[1]) - (p1[0] - p2[0]) * (py - p2[1]);
-    const d1 = s(a, b), d2 = s(b, c), d3 = s(c, a);
-    const neg = d1 < 0 || d2 < 0 || d3 < 0;
-    const pos = d1 > 0 || d2 > 0 || d3 > 0;
-    return !(neg && pos);
-  }
-  function circleTri(cx, cy, r, pts) {
-    if (pointInTri(cx, cy, pts)) return true;
-    for (let i = 0; i < 3; i++) {
-      const a = pts[i], b = pts[(i + 1) % 3];
-      if (distToSeg(cx, cy, a[0], a[1], b[0], b[1]) < r) return true;
-    }
-    return false;
+  function setUp(v) {
+    const w = play.wave;
+    if (w.up === v) return;
+    w.up = v;
+    play.trail.push({ x: w.x, y: w.y });
   }
 
-  function collides() {
-    if (wave.y - WAVE_R < BORDER || wave.y + WAVE_R > WORLD_H - BORDER) return true;
-    for (const o of obstacles) {
-      if (o.type === 'rect') {
-        if (o.x > wave.x + 50 || o.x + o.w < wave.x - 50) continue;
-        if (circleRect(wave.x, wave.y, WAVE_R, o)) return true;
-      } else {
-        if (o.pts[0][0] > wave.x + 50 || o.pts[1][0] < wave.x - 50) continue;
-        if (circleTri(wave.x, wave.y, WAVE_R * 0.85, o.pts)) return true;
-      }
-    }
-    return false;
-  }
-
-  // ---------- Input ----------
   function press() {
-    if (state === 'ready') { start(); }
-    else if (state === 'dead') {
-      if (performance.now() - deadTime > 500) { reset(); start(); }
-      return;
+    holding = true;
+    if (screen !== 'play' || !play) return;
+    if (play.state === 'ready') {
+      hideMsg();
+      play.state = 'playing';
+      setUp(true);
+    } else if (play.state === 'dead') {
+      if (performance.now() - play.deadAt < 350) return;
+      hideMsg();
+      resetRun();
+      play.state = 'playing';
+      setUp(true);
+    } else if (play.state === 'playing') {
+      setUp(true);
     }
-    setHold(true);
   }
-  function release() { setHold(false); }
-
-  function setHold(h) {
-    if (holding === h) return;
-    holding = h;
-    if (state === 'playing') {
-      wave.up = h;
-      trail.push({ x: wave.x, y: wave.y }); // corner of the zigzag
-    }
+  function release() {
+    holding = false;
+    if (screen === 'play' && play && play.state === 'playing') setUp(false);
   }
 
-  window.addEventListener('pointerdown', (e) => { e.preventDefault(); press(); });
-  window.addEventListener('pointerup', release);
-  window.addEventListener('pointercancel', release);
-  window.addEventListener('blur', release);
-  window.addEventListener('contextmenu', (e) => e.preventDefault());
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
-      e.preventDefault();
-      if (!e.repeat) press();
-    }
-  });
-  window.addEventListener('keyup', (e) => {
-    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') release();
-  });
-
-  function start() {
-    state = 'playing';
-    overlay.classList.add('hidden');
-    wave.up = holding;
+  function updateHud() {
+    $('hudPct').textContent = `${play.pct}%`;
+    $('progressFill').style.width = `${play.pct}%`;
   }
 
   function die() {
-    state = 'dead';
-    deadTime = performance.now();
-    shake = 14;
+    const w = play.wave;
+    play.state = 'dead';
+    play.deadAt = performance.now();
+    play.shake = 14;
     for (let i = 0; i < 40; i++) {
-      const a = Math.random() * Math.PI * 2, v = rand(80, 420);
-      particles.push({ x: wave.x, y: wave.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rand(0.4, 0.9), max: 0.9 });
+      const a = Math.random() * Math.PI * 2, v = 80 + Math.random() * 340;
+      play.particles.push({ x: w.x, y: w.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.4 + Math.random() * 0.5, max: 0.9 });
     }
-    if (score > best) {
-      best = score;
-      bestEl.textContent = best;
-      try { localStorage.setItem(BEST_KEY, String(best)); } catch { /* ignore */ }
-    }
-    titleEl.textContent = 'CRASHED';
-    subtitleEl.textContent = `Score: ${score}${score === best && score > 0 ? '  (new best!)' : ''}`;
-    promptEl.textContent = 'Tap, click or press Space to retry';
-    setTimeout(() => { if (state === 'dead') overlay.classList.remove('hidden'); }, 450);
-  }
-
-  // ---------- Update ----------
-  function update(dt) {
-    if (state === 'playing') {
-      wave.speed = Math.min(MAX_SPEED, START_SPEED + wave.x / 150);
-      // 45°: vertical speed equals horizontal speed.
-      wave.x += wave.speed * dt;
-      wave.y += (wave.up ? -1 : 1) * wave.speed * dt;
-      camX = wave.x - viewW * 0.3;
-
-      while (nextGateX < camX + viewW + 200) addGate();
-      obstacles = obstacles.filter((o) => (o.type === 'rect' ? o.x + o.w : o.pts[1][0]) > camX - 50);
-      while (trail.length > 2 && trail[1].x < camX - 20) trail.shift();
-
-      score = Math.floor(wave.x / 50);
-      scoreEl.textContent = score;
-
-      if (collides()) die();
-    }
-
-    for (const p of particles) {
-      p.x += p.vx * dt; p.y += p.vy * dt;
-      p.vx *= 0.95; p.vy *= 0.95;
-      p.life -= dt;
-    }
-    particles = particles.filter((p) => p.life > 0);
-    shake = Math.max(0, shake - dt * 40);
-  }
-
-  // ---------- Render ----------
-  function render() {
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    ctx.fillStyle = '#070815';
-    ctx.fillRect(0, 0, W, H);
-
-    const sx = (Math.random() - 0.5) * shake, sy = (Math.random() - 0.5) * shake;
-    ctx.setTransform(DPR * scale, 0, 0, DPR * scale, (-camX * scale + sx) * DPR, sy * DPR);
-
-    // Background grid (scrolls slower for depth).
-    ctx.strokeStyle = 'rgba(120,130,220,0.08)';
-    ctx.lineWidth = 1;
-    const gx = camX * 0.5;
-    const step = 60;
-    ctx.beginPath();
-    for (let x = Math.floor(gx / step) * step; x < gx + viewW + step; x += step) {
-      const wx = x - gx + camX;
-      ctx.moveTo(wx, 0); ctx.lineTo(wx, WORLD_H);
-    }
-    for (let y = 0; y <= WORLD_H; y += step) { ctx.moveTo(camX, y); ctx.lineTo(camX + viewW, y); }
-    ctx.stroke();
-
-    // Floor and ceiling.
-    ctx.fillStyle = '#141633';
-    ctx.fillRect(camX - 10, 0, viewW + 20, BORDER);
-    ctx.fillRect(camX - 10, WORLD_H - BORDER, viewW + 20, BORDER);
-    ctx.strokeStyle = '#ff4f8b';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(camX - 10, BORDER); ctx.lineTo(camX + viewW + 10, BORDER);
-    ctx.moveTo(camX - 10, WORLD_H - BORDER); ctx.lineTo(camX + viewW + 10, WORLD_H - BORDER);
-    ctx.stroke();
-
-    // Obstacles.
-    for (const o of obstacles) {
-      if (o.type === 'rect') {
-        ctx.fillStyle = '#141633';
-        ctx.fillRect(o.x, o.y, o.w, o.h);
-        ctx.strokeStyle = '#ff4f8b';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(o.x + 1, o.y + 1, o.w - 2, o.h - 2);
-      } else {
-        ctx.fillStyle = '#ff4f8b';
-        ctx.beginPath();
-        ctx.moveTo(o.pts[0][0], o.pts[0][1]);
-        ctx.lineTo(o.pts[1][0], o.pts[1][1]);
-        ctx.lineTo(o.pts[2][0], o.pts[2][1]);
-        ctx.closePath();
-        ctx.fill();
+    const s = play.source;
+    let sub = `${play.pct}%`;
+    if (s.kind === 'level') {
+      const prev = progress.best[s.index] || 0;
+      if (play.pct > prev) {
+        progress.best[s.index] = play.pct;
+        store('thewave.progress', progress);
+        if (prev > 0) sub += '  — new best!';
       }
     }
+    const back = s.kind === 'test' ? 'Editor' : s.kind === 'custom' ? 'Back' : 'Levels';
+    setTimeout(() => {
+      if (play && play.state === 'dead' && screen === 'play') {
+        showMsg({ title: 'CRASHED', sub, prompt: 'Tap or press Space to retry', buttons: [[back, exitPlay]] });
+      }
+    }, 350);
+  }
+
+  function win() {
+    const s = play.source;
+    play.state = 'won';
+    play.pct = 100;
+    updateHud();
+    const buttons = [];
+    if (s.kind === 'level') {
+      progress.done[s.index] = true;
+      progress.best[s.index] = 100;
+      store('thewave.progress', progress);
+      if (s.index + 1 < WL.COUNT) {
+        buttons.push(['Next level ▶', () => startPlay(WL.getLevel(s.index + 1), { kind: 'level', index: s.index + 1 }), true]);
+      }
+      buttons.push(['Levels', exitPlay]);
+    } else if (s.kind === 'test') {
+      buttons.push(['Back to editor', exitPlay, true]);
+    } else {
+      buttons.push(['Play again', () => startPlay(play.data, play.source), true]);
+      buttons.push(['Back', exitPlay]);
+    }
+    const last = s.kind === 'level' && s.index === WL.COUNT - 1;
+    showMsg({
+      title: last ? 'YOU BEAT THE WAVE!' : 'LEVEL COMPLETE',
+      sub: `${play.data.name} — ${play.attempts} attempt${play.attempts === 1 ? '' : 's'}`,
+      buttons,
+      win: true,
+    });
+  }
+
+  function updatePlay(dt) {
+    const p = play;
+    if (p.state === 'playing') {
+      const w = p.wave;
+      const end = p.L.length * CELL;
+      const dist = p.L.speed * dt;
+      const steps = Math.max(1, Math.ceil(dist / 4));
+      const dx = dist / steps;
+      for (let i = 0; i < steps; i++) {
+        w.x += dx;
+        w.y += (w.up ? -1 : 1) * dx; // 45°: vertical speed equals horizontal speed
+        if (WL.collide(p.L, w.x, w.y)) { die(); break; }
+        if (w.x >= end) { win(); break; }
+      }
+      const pct = Math.min(100, Math.floor((w.x / end) * 100));
+      if (pct !== p.pct) { p.pct = pct; updateHud(); }
+      const camX = w.x - playView().viewW * 0.3;
+      while (p.trail.length > 2 && p.trail[1].x < camX - 20) p.trail.shift();
+    }
+    for (const q of p.particles) {
+      q.x += q.vx * dt; q.y += q.vy * dt;
+      q.vx *= 0.95; q.vy *= 0.95;
+      q.life -= dt;
+    }
+    p.particles = p.particles.filter((q) => q.life > 0);
+    p.shake = Math.max(0, p.shake - dt * 40);
+  }
+
+  // ---------- Editor ----------
+  const editor = {
+    id: null, map: new Map(), speed: 400, camX: -2 * CELL,
+    tool: 'block', dir: WL.UP, drag: null, hover: null, dirty: false, L: null,
+  };
+  const DIR_ARROWS = ['▲', '▶', '▼', '◀'];
+  const SLOPE_GLYPHS = ['◣', '◢', '◥', '◤'];
+
+  function openEditor(lv) {
+    editor.id = lv ? lv.id : null;
+    editor.map = new Map();
+    if (lv) for (const [c, r, t, dir] of lv.objects) editor.map.set(c * ROWS + r, { c, r, t, dir: dir || 0 });
+    editor.speed = lv ? lv.speed : 400;
+    editor.camX = -2 * CELL;
+    editor.dirty = false;
+    $('edName').value = lv ? lv.name : '';
+    $('edSpeed').value = String(editor.speed);
+    if ($('edSpeed').value !== String(editor.speed)) {
+      const o = document.createElement('option');
+      o.value = String(editor.speed);
+      o.textContent = `Custom (${editor.speed})`;
+      $('edSpeed').appendChild(o);
+      $('edSpeed').value = String(editor.speed);
+    }
+    recompileEditor();
+    showScreen('editor');
+  }
+
+  function editorData() {
+    return {
+      name: $('edName').value.trim() || 'Untitled level',
+      speed: editor.speed,
+      objects: [...editor.map.values()].map((o) => [o.c, o.r, o.t, o.dir]),
+    };
+  }
+  function recompileEditor() {
+    editor.L = WL.compile(editorData());
+    syncScroll();
+  }
+
+  function syncEditorUI() {
+    document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === editor.tool));
+    $('edDir').textContent = `⟳ ${editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
+    syncScroll();
+  }
+  function maxCam() { return (editor.L.length + 5) * CELL - editorView().viewW; }
+  function clampCam() { editor.camX = Math.max(-2 * CELL, Math.min(Math.max(-2 * CELL, maxCam()), editor.camX)); }
+  function syncScroll() {
+    if (!editor.L) return;
+    const s = $('edScroll');
+    s.max = String(Math.max(0, Math.round(maxCam() + 2 * CELL)));
+    s.value = String(Math.round(editor.camX + 2 * CELL));
+  }
+
+  document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => { editor.tool = b.dataset.tool; syncEditorUI(); }));
+  $('edDir').addEventListener('click', () => { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); });
+  $('edSpeed').addEventListener('change', (e) => { editor.speed = Number(e.target.value); editor.dirty = true; });
+  $('edName').addEventListener('input', () => { editor.dirty = true; });
+  $('edScroll').addEventListener('input', (e) => { editor.camX = Number(e.target.value) - 2 * CELL; });
+  $('edClear').addEventListener('click', () => {
+    if (editor.map.size && confirm('Remove everything from this level?')) {
+      editor.map.clear();
+      editor.dirty = true;
+      recompileEditor();
+    }
+  });
+  $('edBack').addEventListener('click', () => {
+    if (editor.dirty && !confirm('Leave without saving your changes?')) return;
+    showScreen('mylevels');
+  });
+  $('edSave').addEventListener('click', () => {
+    const data = editorData();
+    if (!editor.id) editor.id = 'lv' + Date.now();
+    const lv = { id: editor.id, ...data };
+    const idx = customs.findIndex((x) => x.id === editor.id);
+    if (idx >= 0) customs[idx] = lv; else customs.push(lv);
+    saveCustoms();
+    $('edName').value = data.name;
+    editor.dirty = false;
+    toast('Saved!');
+  });
+  $('edTest').addEventListener('click', () => startPlay(editorData(), { kind: 'test' }));
+
+  function cellAt(clientX, clientY) {
+    const v = editorView();
+    const wx = editor.camX + clientX / v.scale;
+    const wy = (clientY - v.offY) / v.scale;
+    return { c: Math.floor(wx / CELL), r: Math.floor(wy / CELL) };
+  }
+
+  function applyTool(c, r, mode) {
+    if (c < 0 || r < 1 || r > ROWS - 2) return;
+    const key = c * ROWS + r;
+    const cur = editor.map.get(key);
+    if (mode === 'erase') {
+      if (!cur) return;
+      editor.map.delete(key);
+    } else if (mode === 'block') {
+      if (cur && cur.t === BLOCK) return;
+      editor.map.set(key, { c, r, t: BLOCK, dir: 0 });
+    } else if (mode === 'spike' || mode === 'slope') {
+      const t = mode === 'spike' ? SPIKE : SLOPE;
+      if (cur && cur.t === t && cur.dir === editor.dir) return;
+      editor.map.set(key, { c, r, t, dir: editor.dir });
+    }
+    editor.dirty = true;
+    recompileEditor();
+  }
+
+  function editorPointerDown(e) {
+    const { c, r } = cellAt(e.clientX, e.clientY);
+    if (editor.tool === 'pan' || e.button === 1) {
+      editor.drag = { mode: 'pan', startX: e.clientX, startCam: editor.camX };
+      return;
+    }
+    let mode = e.button === 2 ? 'erase' : editor.tool;
+    if (mode === 'spike' || mode === 'slope') {
+      // Tapping an existing slope/spike of the same kind rotates it.
+      const cur = editor.map.get(c * ROWS + r);
+      if (cur && cur.t === (mode === 'spike' ? SPIKE : SLOPE)) {
+        cur.dir = (cur.dir + 1) % 4;
+        editor.dir = cur.dir;
+        editor.dirty = true;
+        recompileEditor();
+        syncEditorUI();
+        return;
+      }
+    }
+    editor.drag = { mode, last: `${c},${r}` };
+    applyTool(c, r, mode);
+  }
+  function editorPointerMove(e) {
+    const { c, r } = cellAt(e.clientX, e.clientY);
+    editor.hover = e.pointerType === 'mouse' ? { c, r } : null;
+    const d = editor.drag;
+    if (!d) return;
+    if (d.mode === 'pan') {
+      editor.camX = d.startCam - (e.clientX - d.startX) / editorView().scale;
+      clampCam();
+      syncScroll();
+    } else if (`${c},${r}` !== d.last) {
+      d.last = `${c},${r}`;
+      applyTool(c, r, d.mode);
+    }
+  }
+
+  canvas.addEventListener('wheel', (e) => {
+    if (screen !== 'editor') return;
+    e.preventDefault();
+    editor.camX += (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) / editorView().scale;
+    clampCam();
+    syncScroll();
+  }, { passive: false });
+
+  // ---------- Input ----------
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (screen === 'play') press();
+    else if (screen === 'editor') { canvas.setPointerCapture(e.pointerId); editorPointerDown(e); }
+  });
+  canvas.addEventListener('pointermove', (e) => { if (screen === 'editor') editorPointerMove(e); });
+  canvas.addEventListener('pointerleave', () => { editor.hover = null; });
+  const endPointer = () => { release(); editor.drag = null; };
+  window.addEventListener('pointerup', endPointer);
+  window.addEventListener('pointercancel', endPointer);
+  window.addEventListener('blur', endPointer);
+  window.addEventListener('contextmenu', (e) => { if (e.target === canvas) e.preventDefault(); });
+
+  const FLY_KEYS = ['Space', 'ArrowUp', 'KeyW'];
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (screen === 'play') {
+      if (FLY_KEYS.includes(e.code)) {
+        e.preventDefault();
+        if (e.repeat) return;
+        if (play.state === 'won') { const b = $('msgButtons').querySelector('button'); if (b) b.click(); return; }
+        press();
+      } else if (e.code === 'Escape') exitPlay();
+    } else if (screen === 'editor') {
+      const tools = { Digit1: 'block', Digit2: 'slope', Digit3: 'spike', Digit4: 'erase', Digit5: 'pan' };
+      if (tools[e.code]) { editor.tool = tools[e.code]; syncEditorUI(); }
+      else if (e.code === 'KeyR') { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); }
+      else if (e.code === 'ArrowRight' || e.code === 'KeyD') { editor.camX += CELL * 3; clampCam(); syncScroll(); }
+      else if (e.code === 'ArrowLeft' || e.code === 'KeyA') { editor.camX -= CELL * 3; clampCam(); syncScroll(); }
+    }
+  });
+  window.addEventListener('keyup', (e) => { if (FLY_KEYS.includes(e.code)) release(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+
+  // ---------- Rendering ----------
+  function drawWorld(L, camX, view, opts = {}) {
+    const { scale, offY, viewW } = view;
+    const sx = opts.shake ? (Math.random() - 0.5) * opts.shake : 0;
+    const sy = opts.shake ? (Math.random() - 0.5) * opts.shake : 0;
+    ctx.setTransform(DPR * scale, 0, 0, DPR * scale, (-camX * scale + sx) * DPR, (offY + sy) * DPR);
+
+    // Background grid.
+    ctx.lineWidth = 1 / scale;
+    ctx.beginPath();
+    if (opts.editor) {
+      ctx.strokeStyle = 'rgba(120,130,220,0.16)';
+      const c0 = Math.floor(camX / CELL);
+      for (let c = c0; c * CELL < camX + viewW; c++) { ctx.moveTo(c * CELL, CELL); ctx.lineTo(c * CELL, WORLD_H - CELL); }
+      for (let r = 1; r < ROWS; r++) { ctx.moveTo(camX, r * CELL); ctx.lineTo(camX + viewW, r * CELL); }
+    } else {
+      ctx.strokeStyle = 'rgba(120,130,220,0.07)';
+      const gx = camX * 0.5, step = 60;
+      for (let x = Math.floor(gx / step) * step; x < gx + viewW + step; x += step) {
+        const wx = x - gx + camX;
+        ctx.moveTo(wx, 0); ctx.lineTo(wx, WORLD_H);
+      }
+      for (let y = 0; y <= WORLD_H; y += step) { ctx.moveTo(camX, y); ctx.lineTo(camX + viewW, y); }
+    }
+    ctx.stroke();
+
+    // Ceiling and floor.
+    ctx.fillStyle = COLORS.solid;
+    ctx.fillRect(camX - 10, 0, viewW + 20, CELL);
+    ctx.fillRect(camX - 10, WORLD_H - CELL, viewW + 20, CELL);
+
+    // Blocks and spikes in view.
+    const c0 = Math.floor(camX / CELL) - 1, c1 = Math.ceil((camX + viewW) / CELL) + 1;
+    // Is side `side` of cell (c, r) fully solid? Used to hide edges between touching pieces.
+    const solid = (c, r, side) => r <= 0 || r >= ROWS - 1 || WL.fullSides(L.map.get(c * ROWS + r)).includes(side);
+    ctx.fillStyle = COLORS.solid;
+    ctx.beginPath();
+    const edges = new Path2D();
+    const spikes = new Path2D();
+    const slopes = new Path2D();
+    for (let c = c0; c <= c1; c++) {
+      for (let r = 1; r < ROWS - 1; r++) {
+        const o = L.map.get(c * ROWS + r);
+        if (!o) continue;
+        const x = c * CELL, y = r * CELL;
+        if (o.t === BLOCK) {
+          ctx.rect(x, y, CELL, CELL);
+          if (!solid(c, r - 1, 'b')) { edges.moveTo(x, y); edges.lineTo(x + CELL, y); }
+          if (!solid(c, r + 1, 't')) { edges.moveTo(x, y + CELL); edges.lineTo(x + CELL, y + CELL); }
+          if (!solid(c - 1, r, 'r')) { edges.moveTo(x, y); edges.lineTo(x, y + CELL); }
+          if (!solid(c + 1, r, 'l')) { edges.moveTo(x + CELL, y); edges.lineTo(x + CELL, y + CELL); }
+        } else if (o.t === SLOPE) {
+          const p = WL.slopePoints(c, r, o.dir); // [leg end, right-angle corner, leg end]
+          slopes.moveTo(p[0][0], p[0][1]); slopes.lineTo(p[1][0], p[1][1]); slopes.lineTo(p[2][0], p[2][1]); slopes.closePath();
+          edges.moveTo(p[0][0], p[0][1]); edges.lineTo(p[2][0], p[2][1]); // the diagonal face
+          const legs = WL.fullSides(o);
+          const nb = { t: [0, -1, 'b'], b: [0, 1, 't'], l: [-1, 0, 'r'], r: [1, 0, 'l'] };
+          for (const side of legs) {
+            const [dc, dr, opp] = nb[side];
+            if (solid(c + dc, r + dr, opp)) continue;
+            const x0 = side === 'r' ? x + CELL : x, y0 = side === 'b' ? y + CELL : y;
+            edges.moveTo(x0, y0);
+            if (side === 't' || side === 'b') edges.lineTo(x0 + CELL, y0); else edges.lineTo(x0, y0 + CELL);
+          }
+        } else {
+          const p = WL.spikePoints(c, r, o.dir, 0.92);
+          spikes.moveTo(p[0][0], p[0][1]); spikes.lineTo(p[1][0], p[1][1]); spikes.lineTo(p[2][0], p[2][1]); spikes.closePath();
+        }
+      }
+    }
+    ctx.fill();
+    ctx.fill(slopes);
+    // Floor/ceiling edge lines, skipping where blocks touch them.
+    for (let c = c0; c <= c1; c++) {
+      if (!solid(c, 1, 't')) { edges.moveTo(c * CELL, CELL); edges.lineTo(c * CELL + CELL, CELL); }
+      if (!solid(c, ROWS - 2, 'b')) { edges.moveTo(c * CELL, WORLD_H - CELL); edges.lineTo(c * CELL + CELL, WORLD_H - CELL); }
+    }
+    ctx.strokeStyle = COLORS.edge;
+    ctx.lineWidth = 2;
+    ctx.stroke(edges);
+    ctx.fillStyle = COLORS.edge;
+    ctx.fill(spikes);
+
+    // Finish line.
+    const fx = L.length * CELL;
+    if (fx > camX - 20 && fx < camX + viewW + 20) {
+      for (let r = 1; r < ROWS - 1; r++) {
+        for (let k = 0; k < 2; k++) {
+          ctx.fillStyle = (r + k) % 2 ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.15)';
+          ctx.fillRect(fx + k * (CELL / 2), r * CELL, CELL / 2, CELL);
+        }
+      }
+    }
+  }
+
+  function drawWave(w, alpha = 1) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(w.x, w.y);
+    ctx.rotate(w.up ? -Math.PI / 4 : Math.PI / 4);
+    ctx.shadowColor = COLORS.wave;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = '#eafdff';
+    ctx.beginPath();
+    ctx.moveTo(15, 0);
+    ctx.lineTo(-10, -10);
+    ctx.lineTo(-5, 0);
+    ctx.lineTo(-10, 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function renderPlay() {
+    const view = playView();
+    const p = play;
+    const camX = p.wave.x - view.viewW * 0.3;
+    drawWorld(p.L, camX, view, { shake: p.shake });
 
     // Zigzag trail.
-    if (state !== 'ready' || trail.length) {
-      ctx.save();
-      ctx.strokeStyle = 'rgba(94,242,255,0.85)';
-      ctx.shadowColor = '#5ef2ff';
-      ctx.shadowBlur = 12;
-      ctx.lineWidth = 5;
-      ctx.lineJoin = 'miter';
-      ctx.beginPath();
-      ctx.moveTo(trail[0].x, trail[0].y);
-      for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
-      ctx.lineTo(wave.x, wave.y);
-      ctx.stroke();
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.strokeStyle = 'rgba(94,242,255,0.85)';
+    ctx.shadowColor = COLORS.wave;
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(p.trail[0].x, p.trail[0].y);
+    for (let i = 1; i < p.trail.length; i++) ctx.lineTo(p.trail[i].x, p.trail[i].y);
+    ctx.lineTo(p.wave.x, p.wave.y);
+    ctx.stroke();
+    ctx.restore();
 
-    // The wave (arrow), pointing along its 45° direction.
-    if (state !== 'dead') {
-      ctx.save();
-      ctx.translate(wave.x, wave.y);
-      ctx.rotate(wave.up ? -Math.PI / 4 : Math.PI / 4);
-      ctx.shadowColor = '#5ef2ff';
-      ctx.shadowBlur = 18;
-      ctx.fillStyle = '#eafdff';
-      ctx.beginPath();
-      ctx.moveTo(16, 0);
-      ctx.lineTo(-10, -11);
-      ctx.lineTo(-5, 0);
-      ctx.lineTo(-10, 11);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
+    if (p.state !== 'dead') drawWave(p.wave);
 
-    // Crash particles.
-    for (const p of particles) {
-      ctx.globalAlpha = Math.max(0, p.life / p.max);
-      ctx.fillStyle = '#5ef2ff';
-      ctx.fillRect(p.x - 2.5, p.y - 2.5, 5, 5);
+    for (const q of p.particles) {
+      ctx.globalAlpha = Math.max(0, q.life / q.max);
+      ctx.fillStyle = COLORS.wave;
+      ctx.fillRect(q.x - 2.5, q.y - 2.5, 5, 5);
     }
     ctx.globalAlpha = 1;
   }
 
-  // ---------- Loop ----------
+  function renderEditor() {
+    const view = editorView();
+    clampCam();
+    drawWorld(editor.L, editor.camX, view, { editor: true });
+
+    // Start marker.
+    drawWave({ x: 0, y: WORLD_H / 2, up: false }, 0.8);
+
+    // Hover preview.
+    const h = editor.hover;
+    if (h && !editor.drag && h.r >= 1 && h.r <= ROWS - 2 && h.c >= 0 && editor.tool !== 'pan') {
+      ctx.globalAlpha = 0.45;
+      if (editor.tool === 'erase') {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(h.c * CELL + 2, h.r * CELL + 2, CELL - 4, CELL - 4);
+      } else if (editor.tool === 'block') {
+        ctx.fillStyle = COLORS.edge;
+        ctx.fillRect(h.c * CELL, h.r * CELL, CELL, CELL);
+      } else {
+        const p = editor.tool === 'slope' ? WL.slopePoints(h.c, h.r, editor.dir) : WL.spikePoints(h.c, h.r, editor.dir, 0.92);
+        ctx.fillStyle = COLORS.edge;
+        ctx.beginPath(); ctx.moveTo(...p[0]); ctx.lineTo(...p[1]); ctx.lineTo(...p[2]); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  let menuCam = 0;
+  function renderMenuBackground(dt) {
+    const view = playView();
+    const L = menuBg();
+    menuCam += 120 * dt;
+    if (menuCam > L.length * CELL) menuCam = -view.viewW;
+    drawWorld(L, menuCam, view);
+  }
+  let menuL = null;
+  const menuBg = () => menuL || (menuL = WL.compile(WL.getLevel(2)));
+
+  // ---------- Main loop ----------
   let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
-    update(dt);
-    render();
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, W, H);
+    if (screen === 'play' && play) { updatePlay(dt); renderPlay(); }
+    else if (screen === 'editor') renderEditor();
+    else renderMenuBackground(dt);
     requestAnimationFrame(frame);
   }
+  showScreen('menu');
   requestAnimationFrame(frame);
 })();

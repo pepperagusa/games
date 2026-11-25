@@ -9,17 +9,85 @@
 <body>
   <canvas id="game"></canvas>
 
-  <div id="hud">
-    <div class="stat"><span class="label">Score</span><span id="score">0</span></div>
-    <div class="stat right"><span class="label">Best</span><span id="best">0</span></div>
+  <!-- Main menu -->
+  <section id="menu" class="screen">
+    <h1>THE WAVE</h1>
+    <p class="sub">Hold to go up. Let go to go down.</p>
+    <div class="stack">
+      <button id="btnPlay" class="primary">Play</button>
+      <button id="btnCreate">Create</button>
+    </div>
+    <p class="hint">Mouse, touch, Space or ↑ to fly. Esc to leave a level.</p>
+  </section>
+
+  <!-- Level select -->
+  <section id="levels" class="screen hidden">
+    <h2>Levels</h2>
+    <div id="levelGrid" class="level-grid"></div>
+    <button class="back" data-go="menu">Back</button>
+  </section>
+
+  <!-- Create mode: my levels -->
+  <section id="mylevels" class="screen hidden">
+    <h2>Create</h2>
+    <div class="row">
+      <button id="btnNewLevel" class="primary">New level</button>
+      <button id="btnImport">Import code</button>
+    </div>
+    <ul id="customList" class="custom-list"></ul>
+    <p id="customEmpty" class="hint">You haven't made any levels yet.</p>
+    <button class="back" data-go="menu">Back</button>
+  </section>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hidden">
+    <button id="btnQuit" class="icon" aria-label="Leave level">✕</button>
+    <div class="hud-mid">
+      <div id="hudName"></div>
+      <div class="progress"><div id="progressFill"></div></div>
+    </div>
+    <div class="hud-right"><span id="hudPct">0%</span><span id="hudAttempt"></span></div>
   </div>
 
-  <div id="overlay">
-    <h1 id="title">THE WAVE</h1>
-    <p id="subtitle">Hold to go up. Let go to go down.</p>
-    <p id="prompt">Tap, click or press Space to start</p>
+  <!-- In-game message -->
+  <div id="msg" class="hidden">
+    <h2 id="msgTitle"></h2>
+    <p id="msgSub"></p>
+    <div id="msgButtons" class="row"></div>
+    <p id="msgPrompt" class="hint"></p>
   </div>
 
+  <!-- Editor UI -->
+  <div id="edTop" class="ed-bar hidden">
+    <button id="edBack">Back</button>
+    <input id="edName" type="text" maxlength="30" placeholder="Level name">
+    <button id="edSave">Save</button>
+    <button id="edTest" class="primary">▶ Test</button>
+  </div>
+  <div id="edBottom" class="ed-bar hidden">
+    <div class="tools">
+      <button class="tool" data-tool="block" title="Block (1)"><span class="swatch block"></span>Block</button>
+      <button class="tool" data-tool="slope" title="Slope (2)"><span class="swatch slope"></span>Slope</button>
+      <button class="tool" data-tool="spike" title="Spike (3)"><span class="swatch spike"></span>Spike</button>
+      <button class="tool" data-tool="erase" title="Eraser (4)">⌫ Erase</button>
+      <button class="tool" data-tool="pan" title="Move view (5)">✋ Move</button>
+      <button id="edDir" title="Rotate slope / spike (R)">⟳ ◣</button>
+      <label class="speed">Speed
+        <select id="edSpeed">
+          <option value="330">Slow</option>
+          <option value="400" selected>Normal</option>
+          <option value="470">Fast</option>
+          <option value="540">Very fast</option>
+        </select>
+      </label>
+      <button id="edClear">Clear</button>
+    </div>
+    <input id="edScroll" type="range" min="0" max="100" value="0" aria-label="Scroll level">
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="js/levels.js"></script>
   <script src="js/game1.js"></script>
 </body>
 </html>

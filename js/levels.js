@@ -7,7 +7,9 @@
   const ROWS = 20;          // rows 0 and 19 are the solid ceiling and floor
   const WORLD_H = CELL * ROWS;
   const WAVE_R = 6;         // collision radius of the wave
-  const BLOCK = 0, SPIKE = 1, SLOPE = 2;
+  const BLOCK = 0, SPIKE = 1, SLOPE = 2, BOOST = 3;
+  // Speed boosters: dir 0 = regular (1 arrow), 1 = double arrow (+1/4), 2 = triple arrow (+1/4 of double).
+  const BOOST_MULT = [1, 1.25, 1.25 * 1.25];
   // Slope direction = which corner holds the right angle (the solid corner):
   // 0 bottom-left, 1 bottom-right, 2 top-right, 3 top-left.
   // Spike direction = where the tip points.
@@ -234,7 +236,7 @@
     for (let c = c0; c <= c1; c++) {
       for (let rr = r0; rr <= r1; rr++) {
         const o = L.map.get(c * ROWS + rr);
-        if (!o) continue;
+        if (!o || o.t === BOOST) continue;
         if (o.t === BLOCK) {
           const nx = Math.max(c * CELL, Math.min(x, c * CELL + CELL));
           const ny = Math.max(rr * CELL, Math.min(y, rr * CELL + CELL));
@@ -254,10 +256,24 @@
     return false;
   }
 
+  // Which booster (0..2) is the wave touching at (x, y)? -1 if none.
+  function boostAt(L, x, y) {
+    const r = WAVE_R;
+    const c0 = Math.floor((x - r) / CELL), c1 = Math.floor((x + r) / CELL);
+    const r0 = Math.floor((y - r) / CELL), r1 = Math.floor((y + r) / CELL);
+    for (let c = c0; c <= c1; c++) {
+      for (let rr = r0; rr <= r1; rr++) {
+        const o = L.map.get(c * ROWS + rr);
+        if (o && o.t === BOOST) return o.dir;
+      }
+    }
+    return -1;
+  }
+
   const api = {
-    CELL, ROWS, WORLD_H, WAVE_R, BLOCK, SPIKE, SLOPE, UP, RIGHT, DOWN, LEFT,
+    CELL, ROWS, WORLD_H, WAVE_R, BLOCK, SPIKE, SLOPE, BOOST, BOOST_MULT, UP, RIGHT, DOWN, LEFT,
     COUNT: NAMES.length,
-    getLevel, compile, collide, spikePoints, slopePoints, fullSides, levelLength,
+    getLevel, compile, collide, boostAt, spikePoints, slopePoints, fullSides, levelLength,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.WaveLevels = api;

@@ -181,6 +181,8 @@ button.icon { padding: 6px 12px; font-size: 16px; background: rgba(26, 29, 64, 0
 .swatch.spike { width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 12px solid var(--danger); }
 .swatch.slope { width: 0; height: 0; border-left: 12px solid var(--danger); border-top: 12px solid transparent; }
 .tool.active .swatch.slope { border-left-color: #041219; }
+.boost-ico { color: #ff9f43; font-weight: 800; margin-right: 6px; letter-spacing: -2px; }
+.tool.active .boost-ico { color: #041219; }
 .tool.active .swatch.spike { border-bottom-color: #041219; }
 .speed { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
 #edScroll { flex: 1; min-width: 0; accent-color: var(--accent); }

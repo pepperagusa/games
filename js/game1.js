@@ -3,7 +3,8 @@
   'use strict';
 
   const WL = window.WaveLevels;
-  const { CELL, ROWS, WORLD_H, BLOCK, SPIKE, SLOPE } = WL;
+  const { CELL, ROWS, WORLD_H, BLOCK, SPIKE, SLOPE, BOOST } = WL;
+  const BOOST_COLORS = ['#4da3ff', '#5dff8f', '#ff9f43']; // blue, green, orange
   const COLORS = { bg: '#070815', solid: '#141633', edge: '#ff4f8b', wave: '#5ef2ff', gold: '#ffd166' };
 
   const $ = (id) => document.getElementById(id);
@@ -133,7 +134,8 @@
     const objects = obj.o.filter((o) => Array.isArray(o) && o.length >= 3 &&
       Number.isInteger(o[0]) && o[0] >= 0 && o[0] < 1e6 &&
       Number.isInteger(o[1]) && o[1] >= 1 && o[1] <= ROWS - 2 &&
-      (o[2] === BLOCK || o[2] === SPIKE || o[2] === SLOPE)).map((o) => [o[0], o[1], o[2], (o[3] | 0) & 3]);
+      (o[2] === BLOCK || o[2] === SPIKE || o[2] === SLOPE || o[2] === BOOST))
+      .map((o) => [o[0], o[1], o[2], o[2] === BOOST ? Math.min(2, (o[3] | 0) & 3) : (o[3] | 0) & 3]);
     const minLen = WL.levelLength(objects) - 13;
     const length = Number.isInteger(obj.l) && obj.l >= minLen && obj.l < 1e6 ? obj.l : WL.levelLength(objects);
     return { name: String(obj.n || 'Imported level').slice(0, 30), speed, length, objects };
@@ -182,6 +184,8 @@
   function resetRun() {
     play.attempts++;
     play.wave = { x: 0, y: WORLD_H / 2, up: false };
+    play.speed = play.L.speed;
+    play.boost = 0;
     play.trail = [{ x: 0, y: WORLD_H / 2 }];
     play.particles = [];
     play.shake = 0;
@@ -312,13 +316,22 @@
     if (p.state === 'playing') {
       const w = p.wave;
       const end = p.L.length * CELL;
-      const dist = p.L.speed * dt;
+      const dist = p.speed * dt;
       const steps = Math.max(1, Math.ceil(dist / 4));
       const dx = dist / steps;
       for (let i = 0; i < steps; i++) {
         w.x += dx;
         w.y += (w.up ? -1 : 1) * dx; // 45°: vertical speed equals horizontal speed
         if (WL.collide(p.L, w.x, w.y)) { die(); break; }
+        const b = WL.boostAt(p.L, w.x, w.y);
+        if (b >= 0 && b !== p.boost) {
+          p.boost = b;
+          p.speed = p.L.speed * WL.BOOST_MULT[b];
+          for (let k = 0; k < 14; k++) {
+            const a = Math.random() * Math.PI * 2, v = 60 + Math.random() * 160;
+            p.particles.push({ x: w.x, y: w.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.4, max: 0.4, color: BOOST_COLORS[b] });
+          }
+        }
         if (w.x >= end) { win(); break; }
       }
       const pct = Math.min(100, Math.floor((w.x / end) * 100));
@@ -338,10 +351,11 @@
   // ---------- Editor ----------
   const editor = {
     id: null, map: new Map(), speed: 400, length: 60, camX: -2 * CELL, scrollMax: 0,
-    tool: 'block', dir: WL.UP, drag: null, hover: null, dirty: false, L: null,
+    tool: 'block', dir: WL.UP, boost: 1, drag: null, hover: null, dirty: false, L: null,
   };
   const DIR_ARROWS = ['▲', '▶', '▼', '◀'];
   const SLOPE_GLYPHS = ['◣', '◢', '◥', '◤'];
+  const BOOST_GLYPHS = ['›', '››', '›››'];
 
   function openEditor(lv) {
     editor.id = lv ? lv.id : null;
@@ -380,7 +394,7 @@
 
   function syncEditorUI() {
     document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === editor.tool));
-    $('edDir').textContent = `⟳ ${editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
+    $('edDir').textContent = `⟳ ${editor.tool === 'boost' ? BOOST_GLYPHS[editor.boost] : editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
     syncScroll();
   }
   // Smallest allowed length: the finish must stay past the last piece.
@@ -409,7 +423,12 @@
   }
 
   document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => { editor.tool = b.dataset.tool; syncEditorUI(); }));
-  $('edDir').addEventListener('click', () => { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); });
+  const rotateTool = () => {
+    if (editor.tool === 'boost') editor.boost = (editor.boost + 1) % 3;
+    else editor.dir = (editor.dir + 1) % 4;
+    syncEditorUI();
+  };
+  $('edDir').addEventListener('click', rotateTool);
   $('edSpeed').addEventListener('change', (e) => { editor.speed = Number(e.target.value); editor.dirty = true; });
   $('edName').addEventListener('input', () => { editor.dirty = true; });
   $('edScroll').addEventListener('input', (e) => {
@@ -468,6 +487,9 @@
       const t = mode === 'spike' ? SPIKE : SLOPE;
       if (cur && cur.t === t && cur.dir === editor.dir) return;
       editor.map.set(key, { c, r, t, dir: editor.dir });
+    } else if (mode === 'boost') {
+      if (cur && cur.t === BOOST && cur.dir === editor.boost) return;
+      editor.map.set(key, { c, r, t: BOOST, dir: editor.boost });
     }
     if (mode !== 'erase' && c >= editor.length - 1) editor.length = c + 10;
     editor.dirty = true;
@@ -487,12 +509,13 @@
       return;
     }
     let mode = e.button === 2 ? 'erase' : editor.tool;
-    if (mode === 'spike' || mode === 'slope') {
-      // Tapping an existing slope/spike of the same kind rotates it.
+    if (mode === 'spike' || mode === 'slope' || mode === 'boost') {
+      // Tapping an existing piece of the same kind rotates it (or changes the booster's speed).
       const cur = editor.map.get(c * ROWS + r);
-      if (cur && cur.t === (mode === 'spike' ? SPIKE : SLOPE)) {
-        cur.dir = (cur.dir + 1) % 4;
-        editor.dir = cur.dir;
+      const kind = mode === 'spike' ? SPIKE : mode === 'slope' ? SLOPE : BOOST;
+      if (cur && cur.t === kind) {
+        if (kind === BOOST) { cur.dir = (cur.dir + 1) % 3; editor.boost = cur.dir; }
+        else { cur.dir = (cur.dir + 1) % 4; editor.dir = cur.dir; }
         editor.dirty = true;
         recompileEditor();
         syncEditorUI();
@@ -555,9 +578,9 @@
         press();
       } else if (e.code === 'Escape') exitPlay();
     } else if (screen === 'editor') {
-      const tools = { Digit1: 'block', Digit2: 'slope', Digit3: 'spike', Digit4: 'erase', Digit5: 'pan' };
+      const tools = { Digit1: 'block', Digit2: 'slope', Digit3: 'spike', Digit4: 'boost', Digit5: 'erase', Digit6: 'pan' };
       if (tools[e.code]) { editor.tool = tools[e.code]; syncEditorUI(); }
-      else if (e.code === 'KeyR') { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); }
+      else if (e.code === 'KeyR') rotateTool();
       else if (e.code === 'ArrowRight' || e.code === 'KeyD') { editor.camX += CELL * 3; clampCam(); syncScroll(); }
       else if (e.code === 'ArrowLeft' || e.code === 'KeyA') { editor.camX -= CELL * 3; clampCam(); syncScroll(); }
       else if (e.code === 'Home') $('edGoStart').click();
@@ -607,6 +630,7 @@
     const edges = new Path2D();
     const spikes = new Path2D();
     const slopes = new Path2D();
+    const boosts = [];
     for (let c = c0; c <= c1; c++) {
       for (let r = 1; r < ROWS - 1; r++) {
         const o = L.map.get(c * ROWS + r);
@@ -618,6 +642,8 @@
           if (!solid(c, r + 1, 't')) { edges.moveTo(x, y + CELL); edges.lineTo(x + CELL, y + CELL); }
           if (!solid(c - 1, r, 'r')) { edges.moveTo(x, y); edges.lineTo(x, y + CELL); }
           if (!solid(c + 1, r, 'l')) { edges.moveTo(x + CELL, y); edges.lineTo(x + CELL, y + CELL); }
+        } else if (o.t === BOOST) {
+          boosts.push(o);
         } else if (o.t === SLOPE) {
           const p = WL.slopePoints(c, r, o.dir); // [leg end, right-angle corner, leg end]
           slopes.moveTo(p[0][0], p[0][1]); slopes.lineTo(p[1][0], p[1][1]); slopes.lineTo(p[2][0], p[2][1]); slopes.closePath();
@@ -649,6 +675,7 @@
     ctx.stroke(edges);
     ctx.fillStyle = COLORS.edge;
     ctx.fill(spikes);
+    for (const o of boosts) drawBoost(o.c, o.r, o.dir);
 
     // Finish line.
     const fx = L.length * CELL;
@@ -660,6 +687,36 @@
         }
       }
     }
+  }
+
+  // A speed booster: glowing box with 1, 2 or 3 chevrons.
+  function drawBoost(c, r, n, alpha = 1) {
+    const x = c * CELL, y = r * CELL, color = BOOST_COLORS[n];
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color + '26';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(x + 2, y + 2, CELL - 4, CELL - 4, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const count = n + 1, gap = 6, w = 5;
+    const startX = x + CELL / 2 - ((count - 1) * gap + w) / 2;
+    ctx.beginPath();
+    for (let k = 0; k < count; k++) {
+      const cx = startX + k * gap;
+      ctx.moveTo(cx, y + 9);
+      ctx.lineTo(cx + w, y + CELL / 2);
+      ctx.lineTo(cx, y + CELL - 9);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   function drawWave(w, alpha = 1) {
@@ -703,7 +760,7 @@
 
     for (const q of p.particles) {
       ctx.globalAlpha = Math.max(0, q.life / q.max);
-      ctx.fillStyle = COLORS.wave;
+      ctx.fillStyle = q.color || COLORS.wave;
       ctx.fillRect(q.x - 2.5, q.y - 2.5, 5, 5);
     }
     ctx.globalAlpha = 1;
@@ -747,6 +804,8 @@
       } else if (editor.tool === 'block') {
         ctx.fillStyle = COLORS.edge;
         ctx.fillRect(h.c * CELL, h.r * CELL, CELL, CELL);
+      } else if (editor.tool === 'boost') {
+        drawBoost(h.c, h.r, editor.boost);
       } else {
         const p = editor.tool === 'slope' ? WL.slopePoints(h.c, h.r, editor.dir) : WL.spikePoints(h.c, h.r, editor.dir, 0.92);
         ctx.fillStyle = COLORS.edge;

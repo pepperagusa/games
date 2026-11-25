@@ -122,7 +122,7 @@
   }
 
   function encodeLevel(lv) {
-    const json = JSON.stringify({ n: lv.name, s: lv.speed, o: lv.objects });
+    const json = JSON.stringify({ n: lv.name, s: lv.speed, l: lv.length, o: lv.objects });
     return 'WAVE1:' + btoa(unescape(encodeURIComponent(json)));
   }
   function decodeLevel(code) {
@@ -131,10 +131,12 @@
     const speed = Number(obj.s);
     if (!Array.isArray(obj.o) || !(speed >= 200 && speed <= 800)) throw new Error('bad level');
     const objects = obj.o.filter((o) => Array.isArray(o) && o.length >= 3 &&
-      Number.isInteger(o[0]) && o[0] >= 0 && o[0] < 5000 &&
+      Number.isInteger(o[0]) && o[0] >= 0 && o[0] < 1e6 &&
       Number.isInteger(o[1]) && o[1] >= 1 && o[1] <= ROWS - 2 &&
       (o[2] === BLOCK || o[2] === SPIKE || o[2] === SLOPE)).map((o) => [o[0], o[1], o[2], (o[3] | 0) & 3]);
-    return { name: String(obj.n || 'Imported level').slice(0, 30), speed, objects };
+    const minLen = WL.levelLength(objects) - 13;
+    const length = Number.isInteger(obj.l) && obj.l >= minLen && obj.l < 1e6 ? obj.l : WL.levelLength(objects);
+    return { name: String(obj.n || 'Imported level').slice(0, 30), speed, length, objects };
   }
   function shareLevel(lv) {
     const code = encodeLevel(lv);
@@ -335,7 +337,7 @@
 
   // ---------- Editor ----------
   const editor = {
-    id: null, map: new Map(), speed: 400, camX: -2 * CELL,
+    id: null, map: new Map(), speed: 400, length: 60, camX: -2 * CELL, scrollMax: 0,
     tool: 'block', dir: WL.UP, drag: null, hover: null, dirty: false, L: null,
   };
   const DIR_ARROWS = ['▲', '▶', '▼', '◀'];
@@ -346,6 +348,8 @@
     editor.map = new Map();
     if (lv) for (const [c, r, t, dir] of lv.objects) editor.map.set(c * ROWS + r, { c, r, t, dir: dir || 0 });
     editor.speed = lv ? lv.speed : 400;
+    editor.length = lv ? (lv.length || WL.levelLength(lv.objects)) : 60;
+    editor.scrollMax = 0;
     editor.camX = -2 * CELL;
     editor.dirty = false;
     $('edName').value = lv ? lv.name : '';
@@ -365,6 +369,7 @@
     return {
       name: $('edName').value.trim() || 'Untitled level',
       speed: editor.speed,
+      length: editor.length,
       objects: [...editor.map.values()].map((o) => [o.c, o.r, o.t, o.dir]),
     };
   }
@@ -378,20 +383,46 @@
     $('edDir').textContent = `⟳ ${editor.tool === 'spike' ? DIR_ARROWS[editor.dir] : SLOPE_GLYPHS[editor.dir]}`;
     syncScroll();
   }
-  function maxCam() { return (editor.L.length + 5) * CELL - editorView().viewW; }
-  function clampCam() { editor.camX = Math.max(-2 * CELL, Math.min(Math.max(-2 * CELL, maxCam()), editor.camX)); }
+  // Smallest allowed length: the finish must stay past the last piece.
+  function minLength() {
+    let max = -1;
+    for (const o of editor.map.values()) max = Math.max(max, o.c);
+    return Math.max(10, max + 2);
+  }
+  function setLength(n) {
+    const len = Math.max(minLength(), Math.round(n) || 0);
+    if (len !== editor.length) { editor.length = len; editor.dirty = true; }
+    recompileEditor();
+  }
+  function clampCam() { editor.camX = Math.max(-2 * CELL, editor.camX); }
   function syncScroll() {
     if (!editor.L) return;
     const s = $('edScroll');
-    s.max = String(Math.max(0, Math.round(maxCam() + 2 * CELL)));
-    s.value = String(Math.round(editor.camX + 2 * CELL));
+    const cam = editor.camX + 2 * CELL;
+    // The slider always reaches well past the finish line and past where you are, so it keeps growing.
+    const want = Math.max((editor.length + 60) * CELL, cam + 60 * CELL);
+    if (want > editor.scrollMax || cam < editor.scrollMax * 0.5) editor.scrollMax = want;
+    s.max = String(Math.round(editor.scrollMax));
+    s.value = String(Math.round(cam));
+    const li = $('edLength');
+    if (document.activeElement !== li) li.value = String(editor.length);
   }
 
   document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => { editor.tool = b.dataset.tool; syncEditorUI(); }));
   $('edDir').addEventListener('click', () => { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); });
   $('edSpeed').addEventListener('change', (e) => { editor.speed = Number(e.target.value); editor.dirty = true; });
   $('edName').addEventListener('input', () => { editor.dirty = true; });
-  $('edScroll').addEventListener('input', (e) => { editor.camX = Number(e.target.value) - 2 * CELL; });
+  $('edScroll').addEventListener('input', (e) => {
+    editor.camX = Number(e.target.value) - 2 * CELL;
+    // Near the end of the slider: give it more room.
+    if (Number(e.target.value) > editor.scrollMax * 0.9) { editor.scrollMax *= 1.5; e.target.max = String(Math.round(editor.scrollMax)); }
+  });
+  $('edLength').addEventListener('change', (e) => setLength(Number(e.target.value)));
+  $('edLenMinus').addEventListener('click', () => setLength(editor.length - 10));
+  $('edLenPlus').addEventListener('click', () => setLength(editor.length + 10));
+  const jumpTo = (col) => { editor.camX = col * CELL - editorView().viewW / 2; clampCam(); syncScroll(); };
+  $('edGoStart').addEventListener('click', () => { editor.camX = -2 * CELL; syncScroll(); });
+  $('edGoEnd').addEventListener('click', () => jumpTo(editor.length));
   $('edClear').addEventListener('click', () => {
     if (editor.map.size && confirm('Remove everything from this level?')) {
       editor.map.clear();
@@ -438,6 +469,7 @@
       if (cur && cur.t === t && cur.dir === editor.dir) return;
       editor.map.set(key, { c, r, t, dir: editor.dir });
     }
+    if (mode !== 'erase' && c >= editor.length - 1) editor.length = c + 10;
     editor.dirty = true;
     recompileEditor();
   }
@@ -446,6 +478,12 @@
     const { c, r } = cellAt(e.clientX, e.clientY);
     if (editor.tool === 'pan' || e.button === 1) {
       editor.drag = { mode: 'pan', startX: e.clientX, startCam: editor.camX };
+      return;
+    }
+    const v = editorView();
+    const wx = editor.camX + e.clientX / v.scale;
+    if (e.button === 0 && Math.abs(wx - editor.length * CELL) < CELL * 0.75) {
+      editor.drag = { mode: 'finish', grab: wx - editor.length * CELL };
       return;
     }
     let mode = e.button === 2 ? 'erase' : editor.tool;
@@ -473,6 +511,11 @@
       editor.camX = d.startCam - (e.clientX - d.startX) / editorView().scale;
       clampCam();
       syncScroll();
+    } else if (d.mode === 'finish') {
+      const v = editorView();
+      setLength((editor.camX + e.clientX / v.scale - d.grab) / CELL);
+      // Dragging near the right edge scrolls along, so the level can keep growing.
+      if (e.clientX > W - 40) { editor.camX += CELL; syncScroll(); }
     } else if (`${c},${r}` !== d.last) {
       d.last = `${c},${r}`;
       applyTool(c, r, d.mode);
@@ -517,6 +560,8 @@
       else if (e.code === 'KeyR') { editor.dir = (editor.dir + 1) % 4; syncEditorUI(); }
       else if (e.code === 'ArrowRight' || e.code === 'KeyD') { editor.camX += CELL * 3; clampCam(); syncScroll(); }
       else if (e.code === 'ArrowLeft' || e.code === 'KeyA') { editor.camX -= CELL * 3; clampCam(); syncScroll(); }
+      else if (e.code === 'Home') $('edGoStart').click();
+      else if (e.code === 'End') $('edGoEnd').click();
     }
   });
   window.addEventListener('keyup', (e) => { if (FLY_KEYS.includes(e.code)) release(); });
@@ -668,6 +713,25 @@
     const view = editorView();
     clampCam();
     drawWorld(editor.L, editor.camX, view, { editor: true });
+
+    // Column ruler every 10 columns.
+    ctx.fillStyle = 'rgba(200,205,240,0.55)';
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (let c = Math.max(0, Math.floor(editor.camX / CELL / 10) * 10); c * CELL < editor.camX + view.viewW; c += 10) {
+      if (Math.abs(c - editor.length) > 3) ctx.fillText(String(c), c * CELL + 3, CELL / 2);
+    }
+
+    // Finish line handle.
+    const fx = editor.length * CELL;
+    ctx.fillStyle = COLORS.gold;
+    ctx.fillRect(fx - 3, WORLD_H - CELL + 4, CELL + 6, CELL - 8);
+    ctx.fillStyle = '#041219';
+    ctx.textAlign = 'center';
+    ctx.fillText('⇔', fx + CELL / 2, WORLD_H - CELL / 2);
+    ctx.fillStyle = COLORS.gold;
+    ctx.fillText('FINISH', fx + CELL / 2, CELL / 2);
 
     // Start marker.
     drawWave({ x: 0, y: WORLD_H / 2, up: false }, 0.8);

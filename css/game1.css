@@ -183,7 +183,10 @@ button.icon { padding: 6px 12px; font-size: 16px; background: rgba(26, 29, 64, 0
 .tool.active .swatch.slope { border-left-color: #041219; }
 .tool.active .swatch.spike { border-bottom-color: #041219; }
 .speed { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
-#edScroll { width: 100%; accent-color: var(--accent); }
+#edScroll { flex: 1; min-width: 0; accent-color: var(--accent); }
+.scroll-row { display: flex; align-items: center; gap: 8px; }
+.ed-bar button.mini { padding: 6px 10px; }
+#edLength { width: 72px; font: inherit; font-size: 14px; color: var(--fg); background: #1a1d40; border: 1px solid var(--line); border-radius: 8px; padding: 7px 6px; text-align: center; }
 
 #toast {
   position: fixed;

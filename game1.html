@@ -80,9 +80,18 @@
           <option value="540">Very fast</option>
         </select>
       </label>
+      <label class="speed">Length
+        <button id="edLenMinus" class="mini" title="Shorter">−</button>
+        <input id="edLength" type="number" min="10" step="10" value="60" inputmode="numeric">
+        <button id="edLenPlus" class="mini" title="Longer">+</button>
+      </label>
       <button id="edClear">Clear</button>
     </div>
-    <input id="edScroll" type="range" min="0" max="100" value="0" aria-label="Scroll level">
+    <div class="scroll-row">
+      <button id="edGoStart" class="mini" title="Go to start (Home)">⇤</button>
+      <input id="edScroll" type="range" min="0" max="100" value="0" aria-label="Scroll level">
+      <button id="edGoEnd" class="mini" title="Go to finish (End)">⇥</button>
+    </div>
   </div>
 
   <div id="toast" class="hidden"></div>
